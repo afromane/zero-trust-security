@@ -14,6 +14,25 @@ import java.security.PublicKey;
 import java.security.Signature;
 import java.util.Base64;
 
+/**
+ * Intercepteur automatique branché sur les conteneurs d'écoute Kafka (Spring Kafka {@link RecordInterceptor}).
+ * <p>
+ * Ce composant implémente la barrière d'intégrité Zero Trust pour tous les messages entrants :
+ * <ol>
+ *   <li>Vérifie la présence de l'en-tête {@code X-Signature-RSA}.</li>
+ *   <li>Récupère la clé publique RSA associée depuis le cache mémoire du {@link KmsClient}.</li>
+ *   <li>Vérifie mathématiquement que la signature RSA correspond bien au payload reçu.</li>
+ *   <li><b>En cas de succès :</b> Transmet le message au listener métier {@code @KafkaListener}.</li>
+ *   <li><b>En cas d'échec :</b> Bloque le message et lève une {@link SecurityException}, empêchant tout traitement d'un message altéré.</li>
+ * </ol>
+ * </p>
+ *
+ * @param <K> type de la clé Kafka
+ * @param <V> type de la valeur du message Kafka
+ *
+ * @author afromane
+ * @version 1.0.0
+ */
 public class KafkaSignatureVerificationInterceptor<K, V> implements RecordInterceptor<K, V> {
 
     private static final Logger log = LoggerFactory.getLogger(KafkaSignatureVerificationInterceptor.class);
@@ -21,11 +40,25 @@ public class KafkaSignatureVerificationInterceptor<K, V> implements RecordInterc
     private final KmsClient kmsClient;
     private final ZeroTrustKafkaProperties properties;
 
+    /**
+     * Construit l'intercepteur de vérification avec le client KMS et les propriétés.
+     *
+     * @param kmsClient  client KMS pour récupérer les clés publiques
+     * @param properties configuration de la vérification
+     */
     public KafkaSignatureVerificationInterceptor(KmsClient kmsClient, ZeroTrustKafkaProperties properties) {
         this.kmsClient = kmsClient;
         this.properties = properties;
     }
 
+    /**
+     * Intercepte chaque enregistrement consommé avant qu'il n'atteigne la méthode annotée {@code @KafkaListener}.
+     *
+     * @param record   enregistrement Kafka reçu
+     * @param consumer instance du consommateur Kafka sous-jacent
+     * @return l'enregistrement validé pour traitement par l'application
+     * @throws SecurityException si la signature est absente, invalide ou si le contenu a été altéré
+     */
     @Override
     public ConsumerRecord<K, V> intercept(ConsumerRecord<K, V> record, Consumer<K, V> consumer) {
         if (!properties.isVerificationEnabled()) {
@@ -72,6 +105,9 @@ public class KafkaSignatureVerificationInterceptor<K, V> implements RecordInterc
         }
     }
 
+    /**
+     * Extrait les octets de la charge utile de manière sûre.
+     */
     private byte[] extractPayloadBytes(Object value) {
         if (value == null) {
             return new byte[0];

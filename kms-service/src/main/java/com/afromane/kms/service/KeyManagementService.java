@@ -25,6 +25,21 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Service central de gestion du cycle de vie des clés cryptographiques asymétriques RSA.
+ * <p>
+ * Ce service implémente une stratégie hybride haute sécurité et haute performance :
+ * <ul>
+ *   <li><b>Persistance scellée :</b> Les paires de clés sont conservées dans la base H2 chiffrée en AES-256 sur disque.</li>
+ *   <li><b>Cache mémoire (RAM) :</b> Au démarrage, la clé active est déchiffrée et chargée en mémoire vive.</li>
+ *   <li><b>Zéro I/O disque au runtime :</b> Toutes les signatures et vérifications s'exécutent en mémoire.</li>
+ *   <li><b>Continuité de service :</b> Les redémarrages rechargent la même clé sans déconnecter les utilisateurs.</li>
+ * </ul>
+ * </p>
+ *
+ * @author afromane
+ * @version 1.0.0
+ */
 @Service
 public class KeyManagementService {
 
@@ -36,9 +51,23 @@ public class KeyManagementService {
     private final String defaultKeyId;
     private final int defaultKeySize;
 
+    /**
+     * Cache mémoire vive contenant les paires de clés RSA déchiffrées, indexées par leur keyId.
+     */
     private final Map<String, KeyPair> inMemoryKeyCache = new ConcurrentHashMap<>();
+
+    /**
+     * Identifiant de la clé actuellement active pour les nouvelles signatures.
+     */
     private volatile String activeKeyId;
 
+    /**
+     * Construit le service de gestion des clés avec ses dépendances et propriétés injectées.
+     *
+     * @param keyRepository  dépôt JPA pour la persistance des clés dans H2
+     * @param defaultKeyId   identifiant par défaut de la clé maître
+     * @param defaultKeySize taille par défaut de la clé RSA en bits (ex: 2048)
+     */
     public KeyManagementService(
             KeyRepository keyRepository,
             @Value("${kms.default-key-id:zerotrust-master-key-v1}") String defaultKeyId,
@@ -48,6 +77,13 @@ public class KeyManagementService {
         this.defaultKeySize = defaultKeySize;
     }
 
+    /**
+     * Initialise le trousseau de clés au démarrage du microservice.
+     * <p>
+     * Vérifie si une clé active existe déjà dans la base H2 chiffrée. Si oui, elle est restaurée en RAM.
+     * Sinon, une nouvelle paire RSA est générée, sauvegardée dans la base H2 puis chargée en mémoire vive.
+     * </p>
+     */
     @PostConstruct
     @Transactional
     public void init() {
@@ -95,6 +131,15 @@ public class KeyManagementService {
         }
     }
 
+    /**
+     * Signe un tableau d'octets avec la clé privée RSA active ou spécifiée.
+     *
+     * @param keyId identifiant optionnel de la clé (si {@code null}, la clé active est utilisée)
+     * @param data  octets des données à signer
+     * @return un objet {@link SignResponse} contenant la signature encodée en Base64
+     * @throws IllegalArgumentException si l'identifiant de clé demandé n'est pas présent en mémoire
+     * @throws RuntimeException         si l'algorithme de signature échoue
+     */
     public SignResponse sign(String keyId, byte[] data) {
         String targetKeyId = (keyId != null && !keyId.isBlank()) ? keyId : this.activeKeyId;
         KeyPair keyPair = inMemoryKeyCache.get(targetKeyId);
@@ -119,6 +164,14 @@ public class KeyManagementService {
         }
     }
 
+    /**
+     * Vérifie la validité d'une signature RSA par rapport aux données fournies.
+     *
+     * @param keyId          identifiant de la clé publique à utiliser
+     * @param data           octets des données d'origine
+     * @param signatureBytes octets de la signature à contrôler
+     * @return un objet {@link VerifyResponse} indiquant le statut de validité
+     */
     public VerifyResponse verify(String keyId, byte[] data, byte[] signatureBytes) {
         String targetKeyId = (keyId != null && !keyId.isBlank()) ? keyId : this.activeKeyId;
         KeyPair keyPair = inMemoryKeyCache.get(targetKeyId);
@@ -139,6 +192,11 @@ public class KeyManagementService {
         }
     }
 
+    /**
+     * Exporte l'ensemble des clés publiques actives sous forme de jeu de clés JWKS (RFC 7517).
+     *
+     * @return instance {@link JWKSet} contenant les clés publiques RSA au format standard
+     */
     public JWKSet getJwkSet() {
         List<JWK> jwkList = new ArrayList<>();
 
@@ -157,16 +215,27 @@ public class KeyManagementService {
         return new JWKSet(jwkList);
     }
 
+    /**
+     * Renvoie l'identifiant de la clé actuellement active.
+     *
+     * @return identifiant fonctionnel de la clé
+     */
     public String getActiveKeyId() {
         return activeKeyId;
     }
 
+    /**
+     * Génère une nouvelle paire de clés RSA via le générateur cryptographique sécurisé du JDK.
+     */
     private KeyPair generateRsaKeyPair(int keySize) throws NoSuchAlgorithmException {
         KeyPairGenerator generator = KeyPairGenerator.getInstance(ALGORITHM);
         generator.initialize(keySize, new SecureRandom());
         return generator.generateKeyPair();
     }
 
+    /**
+     * Reconstruit une instance {@link KeyPair} à partir de chaînes au format PEM.
+     */
     private KeyPair restoreKeyPairFromPem(String publicPem, String privatePem) throws Exception {
         byte[] publicBytes = decodePem(publicPem);
         byte[] privateBytes = decodePem(privatePem);
@@ -178,11 +247,17 @@ public class KeyManagementService {
         return new KeyPair(publicKey, privateKey);
     }
 
+    /**
+     * Encode un bloc d'octets binaires au format PEM standard.
+     */
     private String toPem(String type, byte[] data) {
         String base64 = Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(data);
         return "-----BEGIN " + type + "-----\n" + base64 + "\n-----END " + type + "-----\n";
     }
 
+    /**
+     * Nettoie les en-têtes/pieds de page PEM et décode la chaîne Base64 en octets bruts.
+     */
     private byte[] decodePem(String pem) {
         String clean = pem
                 .replaceAll("-----BEGIN [A-Z ]+-----", "")
